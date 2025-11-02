@@ -1,0 +1,10 @@
+{
+  "name": "nexus-mail",
+  "version": "1.0.0",
+  "description": "Custom SMTP client without external dependencies",
+  "main": "index.js",
+  "type": "commonjs",
+  "keywords": ["smtp", "email", "custom"],
+  "author": "King David",
+  "license": "MIT"
+}
