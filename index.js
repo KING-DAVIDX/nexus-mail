@@ -57,7 +57,6 @@ class MySMTPClient extends EventEmitter {
 
             this.socket.once('error', onError);
             
-            // Set connection timeout
             setTimeout(() => {
                 if (!this.connected) {
                     this.socket?.destroy();
@@ -95,8 +94,6 @@ class MySMTPClient extends EventEmitter {
 
     _processBuffer() {
         const lines = this.buffer.split('\r\n');
-        
-        // Keep the last incomplete line in buffer
         this.buffer = lines.pop() || '';
         
         for (const line of lines) {
@@ -183,42 +180,55 @@ class MySMTPClient extends EventEmitter {
             throw new Error('Username and password required for authentication');
         }
 
-        // Try AUTH LOGIN first
         try {
             await this._sendCommand('AUTH LOGIN');
-            
-            // Send username (base64 encoded)
             await this._sendCommand(
                 Buffer.from(this.options.auth.user).toString('base64'),
                 'AUTH LOGIN username'
             );
-            
-            // Send password (base64 encoded)
             await this._sendCommand(
                 Buffer.from(this.options.auth.pass).toString('base64'),
                 'AUTH LOGIN password'
             );
-            
             this.authenticated = true;
             return true;
         } catch (error) {
-            // Fallback to PLAIN auth
             try {
                 const credentials = Buffer.from(
                     `\u0000${this.options.auth.user}\u0000${this.options.auth.pass}`
                 ).toString('base64');
-                
                 await this._sendCommand(
                     `AUTH PLAIN ${credentials}`,
                     `AUTH PLAIN ${Buffer.from(`\u0000${this.options.auth.user}\u0000***`).toString('base64')}`
                 );
-                
                 this.authenticated = true;
                 return true;
             } catch (plainError) {
-                throw new Error(`Authentication failed: ${plainError.message}`);
+                try {
+                    await this._authCramMD5();
+                    this.authenticated = true;
+                    return true;
+                } catch (cramError) {
+                    throw new Error(`Authentication failed: ${error.message}`);
+                }
             }
         }
+    }
+
+    _authCramMD5() {
+        return new Promise((resolve, reject) => {
+            this._sendCommand('AUTH CRAM-MD5').then(response => {
+                const challenge = response.substring(4);
+                const decodedChallenge = Buffer.from(challenge, 'base64').toString();
+                const hmac = crypto.createHmac('md5', this.options.auth.pass);
+                hmac.update(decodedChallenge);
+                const hmacDigest = hmac.digest('hex');
+                const responseData = Buffer.from(`${this.options.auth.user} ${hmacDigest}`).toString('base64');
+                this._sendCommand(responseData, 'AUTH CRAM-MD5 response')
+                    .then(resolve)
+                    .catch(reject);
+            }).catch(reject);
+        });
     }
 
     async sendMail(mailOptions) {
@@ -228,19 +238,15 @@ class MySMTPClient extends EventEmitter {
 
         const { from, to, subject, text, html } = mailOptions;
 
-        // MAIL FROM
         await this._sendCommand(`MAIL FROM:<${from}>`);
 
-        // RCPT TO
         const recipients = Array.isArray(to) ? to : [to];
         for (const recipient of recipients) {
             await this._sendCommand(`RCPT TO:<${recipient}>`);
         }
 
-        // DATA
         await this._sendCommand('DATA');
 
-        // Send email content
         const message = this._buildMessage(from, recipients, subject, text, html);
         await this._sendCommand(message + '\r\n.');
 
@@ -306,7 +312,6 @@ class MySMTPClient extends EventEmitter {
         try {
             await this._sendCommand('QUIT');
         } catch (error) {
-            // Ignore errors during quit
         } finally {
             this.close();
         }
@@ -322,24 +327,20 @@ class MySMTPClient extends EventEmitter {
     }
 }
 
-// Convenience function
 async function sendMail(options, mailOptions) {
     const client = new MySMTPClient(options);
     
     try {
         await client.connect();
-        
-        // Check if we need to upgrade to TLS
+        await client._waitForGreeting();
         const ehloResponse = await client.ehlo();
         if (!options.secure && ehloResponse.includes('STARTTLS')) {
             await client.startTLS();
-            await client.ehlo(); // Send EHLO again after TLS
+            await client.ehlo();
         }
-        
         await client.login();
         const result = await client.sendMail(mailOptions);
         await client.quit();
-        
         return result;
     } catch (error) {
         client.close();
