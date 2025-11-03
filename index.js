@@ -3,8 +3,6 @@
 const net = require('net');
 const tls = require('tls');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
 const { EventEmitter } = require('events');
 
 class MySMTPClient extends EventEmitter {
@@ -238,7 +236,7 @@ class MySMTPClient extends EventEmitter {
             throw new Error('Not authenticated');
         }
 
-        const { from, to, subject, text, html, attachments, headers, priority, readReceipt, calendarEvent } = mailOptions;
+        const { from, to, subject, text, html } = mailOptions;
 
         await this._sendCommand(`MAIL FROM:<${from}>`);
 
@@ -249,18 +247,15 @@ class MySMTPClient extends EventEmitter {
 
         await this._sendCommand('DATA');
 
-        const message = this._buildMessage(from, recipients, subject, text, html, attachments, headers, priority, readReceipt, calendarEvent);
+        const message = this._buildMessage(from, recipients, subject, text, html);
         await this._sendCommand(message + '\r\n.');
 
         return { messageId: this._generateMessageId(), accepted: recipients };
     }
 
-    _buildMessage(from, to, subject, text, html, attachments = [], headers = {}, priority, readReceipt, calendarEvent) {
+    _buildMessage(from, to, subject, text, html) {
         const messageId = this._generateMessageId();
         const date = new Date().toUTCString();
-        const boundary = `boundary_${crypto.randomBytes(8).toString('hex')}`;
-        const relatedBoundary = `related_${crypto.randomBytes(8).toString('hex')}`;
-        const alternativeBoundary = `alternative_${crypto.randomBytes(8).toString('hex')}`;
         
         let message = [
             `Message-ID: <${messageId}>`,
@@ -271,144 +266,34 @@ class MySMTPClient extends EventEmitter {
             'MIME-Version: 1.0'
         ];
 
-        // Add custom headers
-        for (const [key, value] of Object.entries(headers)) {
-            message.push(`${key}: ${value}`);
-        }
-
-        // Add priority header
-        if (priority) {
-            const priorityMap = {
-                high: '1 (High)',
-                normal: '3 (Normal)',
-                low: '5 (Low)'
-            };
-            const priorityValue = priorityMap[priority] || priorityMap.normal;
-            message.push(`Priority: ${priorityValue}`);
-            message.push(`X-Priority: ${priorityValue}`);
-            message.push(`Importance: ${priority}`);
-        }
-
-        // Add read receipt
-        if (readReceipt) {
-            message.push(`Disposition-Notification-To: ${readReceipt}`);
-            message.push(`X-Confirm-Reading-To: ${readReceipt}`);
-            message.push('Return-Receipt-To: 1');
-        }
-
-        const hasAttachments = attachments && attachments.length > 0;
-        const hasEmbeddedImages = html && html.includes('cid:');
-        const hasCalendarEvent = calendarEvent && calendarEvent.content;
-
-        if (hasAttachments || hasEmbeddedImages || hasCalendarEvent) {
-            message.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
-            message.push('');
-            message.push(`--${boundary}`);
-        }
-
-        // Handle calendar events
-        if (hasCalendarEvent) {
-            message.push(`Content-Type: text/calendar; method=${calendarEvent.method || 'REQUEST'}; charset="UTF-8"`);
-            message.push('Content-Transfer-Encoding: base64');
-            message.push('');
-            message.push(Buffer.from(calendarEvent.content).toString('base64'));
-            message.push('');
-            message.push(`--${boundary}`);
-        }
-
-        // Handle HTML with embedded images
-        if (hasEmbeddedImages) {
-            message.push(`Content-Type: multipart/related; boundary="${relatedBoundary}"`);
-            message.push('');
-            message.push(`--${relatedBoundary}`);
-        }
-
-        // Text/HTML content
-        if (html && text) {
-            message.push(`Content-Type: multipart/alternative; boundary="${alternativeBoundary}"`);
-            message.push('');
-            message.push(`--${alternativeBoundary}`);
-            message.push('Content-Type: text/plain; charset="UTF-8"');
-            message.push('Content-Transfer-Encoding: 7bit');
-            message.push('');
-            message.push(text);
-            message.push('');
-            message.push(`--${alternativeBoundary}`);
-            message.push('Content-Type: text/html; charset="UTF-8"');
-            message.push('Content-Transfer-Encoding: 7bit');
-            message.push('');
-            message.push(html);
-            message.push('');
-            message.push(`--${alternativeBoundary}--`);
-        } else if (html) {
-            message.push('Content-Type: text/html; charset="UTF-8"');
-            message.push('Content-Transfer-Encoding: 7bit');
-            message.push('');
-            message.push(html);
+        if (html) {
+            message.push(
+                'Content-Type: multipart/alternative; boundary="boundary"',
+                '',
+                '--boundary',
+                'Content-Type: text/plain; charset="UTF-8"',
+                'Content-Transfer-Encoding: 7bit',
+                '',
+                text || 'This is a multi-part message in MIME format.',
+                '',
+                '--boundary',
+                'Content-Type: text/html; charset="UTF-8"',
+                'Content-Transfer-Encoding: 7bit',
+                '',
+                html,
+                '',
+                '--boundary--'
+            );
         } else {
-            message.push('Content-Type: text/plain; charset="UTF-8"');
-            message.push('Content-Transfer-Encoding: 7bit');
-            message.push('');
-            message.push(text);
-        }
-
-        // Handle embedded images
-        if (hasEmbeddedImages && attachments) {
-            const embeddedAttachments = attachments.filter(att => att.cid);
-            for (const attachment of embeddedAttachments) {
-                message.push('');
-                message.push(`--${relatedBoundary}`);
-                message.push(`Content-Type: ${attachment.contentType || 'application/octet-stream'}`);
-                message.push('Content-Transfer-Encoding: base64');
-                message.push(`Content-ID: <${attachment.cid}>`);
-                message.push('Content-Disposition: inline');
-                message.push('');
-                message.push(this._getAttachmentContent(attachment));
-            }
-            message.push('');
-            message.push(`--${relatedBoundary}--`);
-        }
-
-        // Handle regular attachments
-        if (hasAttachments) {
-            const regularAttachments = attachments.filter(att => !att.cid);
-            for (const attachment of regularAttachments) {
-                message.push('');
-                message.push(`--${boundary}`);
-                message.push(`Content-Type: ${attachment.contentType || 'application/octet-stream'}`);
-                message.push('Content-Transfer-Encoding: base64');
-                message.push(`Content-Disposition: attachment; filename="${attachment.filename || 'file'}"`);
-                if (attachment.contentId) {
-                    message.push(`Content-ID: <${attachment.contentId}>`);
-                }
-                message.push('');
-                message.push(this._getAttachmentContent(attachment));
-            }
-        }
-
-        if (hasAttachments || hasEmbeddedImages || hasCalendarEvent) {
-            message.push('');
-            message.push(`--${boundary}--`);
+            message.push(
+                'Content-Type: text/plain; charset="UTF-8"',
+                'Content-Transfer-Encoding: 7bit',
+                '',
+                text
+            );
         }
 
         return message.join('\r\n');
-    }
-
-    _getAttachmentContent(attachment) {
-        if (attachment.content) {
-            return Buffer.from(attachment.content).toString('base64');
-        } else if (attachment.path) {
-            try {
-                const fileContent = fs.readFileSync(attachment.path);
-                return fileContent.toString('base64');
-            } catch (error) {
-                throw new Error(`Could not read attachment file: ${attachment.path}`);
-            }
-        } else if (attachment.buffer) {
-            return attachment.buffer.toString('base64');
-        } else {
-            throw new Error('Attachment must have content, path, or buffer property');
-        }
     }
 
     _generateMessageId() {
@@ -463,43 +348,7 @@ async function sendMail(options, mailOptions) {
     }
 }
 
-// Helper function to create calendar event
-function createCalendarEvent({ start, end, summary, description, location, organizer, attendees, method = 'REQUEST' }) {
-    const formatDate = (date) => date.toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
-    
-    const ical = [
-        'BEGIN:VCALENDAR',
-        'VERSION:2.0',
-        'PRODID:-//MySMTPClient//EN',
-        'METHOD:' + method,
-        'BEGIN:VEVENT',
-        'UID:' + crypto.randomBytes(16).toString('hex'),
-        'DTSTAMP:' + formatDate(new Date()),
-        'DTSTART:' + formatDate(start),
-        'DTEND:' + formatDate(end),
-        'SUMMARY:' + (summary || ''),
-        'DESCRIPTION:' + (description || ''),
-        'LOCATION:' + (location || ''),
-    ];
-
-    if (organizer) {
-        ical.push(`ORGANIZER:mailto:${organizer}`);
-    }
-
-    if (attendees && attendees.length > 0) {
-        for (const attendee of attendees) {
-            ical.push(`ATTENDEE:mailto:${attendee}`);
-        }
-    }
-
-    ical.push('END:VEVENT');
-    ical.push('END:VCALENDAR');
-
-    return ical.join('\r\n');
-}
-
 module.exports = {
     MySMTPClient,
-    sendMail,
-    createCalendarEvent
+    sendMail
 };
