@@ -8,33 +8,35 @@ const path = require('path');
 const { EventEmitter } = require('events');
 
 const EMAIL_SERVICES = {
-    gmail: { host: 'smtp.gmail.com', port: 587, secure: false },
-    outlook: { host: 'smtp-mail.outlook.com', port: 587, secure: false },
-    yahoo: { host: 'smtp.mail.yahoo.com', port: 587, secure: false },
-    aol: { host: 'smtp.aol.com', port: 587, secure: false },
-    zoho: { host: 'smtp.zoho.com', port: 587, secure: false },
-    icloud: { host: 'smtp.mail.me.com', port: 587, secure: false },
-    office365: { host: 'smtp.office365.com', port: 587, secure: false },
-    custom: { host: '', port: 587, secure: false }
+    gmail:      { host: 'smtp.gmail.com',      port: 465, secure: true },
+    outlook:    { host: 'smtp-mail.outlook.com', port: 587, secure: false },
+    yahoo:      { host: 'smtp.mail.yahoo.com', port: 465, secure: true },
+    aol:        { host: 'smtp.aol.com',        port: 465, secure: true },
+    zoho:       { host: 'smtp.zoho.com',       port: 465, secure: true },
+    icloud:     { host: 'smtp.mail.me.com',    port: 587, secure: false },
+    office365:  { host: 'smtp.office365.com',  port: 587, secure: false },
+    custom:     { host: '', port: 587, secure: false }
 };
 
 class nexusClient extends EventEmitter {
     constructor(options = {}) {
         super();
+
         if (options.service && EMAIL_SERVICES[options.service]) {
             const serviceConfig = EMAIL_SERVICES[options.service];
             this.options = { ...serviceConfig, ...options, auth: options.auth || {} };
         } else {
             this.options = {
                 host: options.host || 'smtp.gmail.com',
-                port: options.port || 587,
-                secure: options.secure || false,
+                port: options.port || 465,
+                secure: options.secure !== undefined ? options.secure : true,
                 auth: options.auth || {},
                 debug: options.debug || false,
                 timeout: options.timeout || 30000,
                 ...options
             };
         }
+
         this.socket = null;
         this.connected = false;
         this.authenticated = false;
@@ -47,19 +49,30 @@ class nexusClient extends EventEmitter {
             if (this.connected) return resolve();
             const connectionOptions = { host: this.options.host, port: this.options.port };
             const onError = (err) => reject(new Error(`Connection failed: ${err.message}`));
+
             const handleConnect = () => {
                 this.connected = true;
                 this._setupSocketHandlers();
                 this.currentHandler = (line) => {
                     const code = parseInt(line.substring(0, 3));
-                    if (code === 220) resolve(line);
-                    else reject(new Error(`Unexpected greeting: ${line}`));
+                    if (code === 220) {
+                        if (this.options.debug) console.log('✅ Connected:', line);
+                        resolve(line);
+                    } else {
+                        reject(new Error(`Unexpected greeting: ${line}`));
+                    }
                 };
             };
+
+            if (this.options.debug)
+                console.log(`🔌 Connecting to ${this.options.host}:${this.options.port} (secure=${this.options.secure})`);
+
             this.socket = this.options.secure
                 ? tls.connect(connectionOptions, handleConnect)
                 : net.connect(connectionOptions, handleConnect);
+
             this.socket.once('error', onError);
+
             setTimeout(() => {
                 if (!this.connected) {
                     this.socket?.destroy();
@@ -94,7 +107,7 @@ class nexusClient extends EventEmitter {
     }
 
     _handleResponse(line) {
-        if (this.options.debug) console.log('SERVER:', line);
+        if (this.options.debug) console.log('📩 SERVER:', line);
         this.emit('response', line);
         if (this.currentHandler) {
             const handler = this.currentHandler;
@@ -106,7 +119,7 @@ class nexusClient extends EventEmitter {
     _sendCommand(command, logCommand = null) {
         return new Promise((resolve, reject) => {
             if (!this.connected) return reject(new Error('Not connected'));
-            if (this.options.debug) console.log('CLIENT:', logCommand || command);
+            if (this.options.debug) console.log('📤 CLIENT:', logCommand || command);
             this.currentHandler = (response) => {
                 const code = parseInt(response.substring(0, 3));
                 if (code >= 200 && code < 400) resolve(response);
@@ -122,6 +135,7 @@ class nexusClient extends EventEmitter {
             const options = { socket: this.socket, host: this.options.host };
             this.socket = tls.connect(options, () => {
                 this._setupSocketHandlers();
+                if (this.options.debug) console.log('🔒 TLS connection established');
                 resolve();
             });
             this.socket.once('error', reject);
@@ -287,7 +301,10 @@ async function sendMail(options, mailOptions) {
     try {
         await client.connect();
         await client.ehlo();
-        if (!options.secure) { await client.startTLS().catch(() => {}); await client.ehlo(); }
+        if (!client.options.secure) { // For STARTTLS mode
+            await client.startTLS().catch(() => {});
+            await client.ehlo();
+        }
         await client.login();
         const result = await client.sendMail(mailOptions);
         await client.quit();
