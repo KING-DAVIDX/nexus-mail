@@ -18,10 +18,9 @@ const EMAIL_SERVICES = {
     custom: { host: '', port: 587, secure: false }
 };
 
-class MySMTPClient extends EventEmitter {
+class nexusClient extends EventEmitter {
     constructor(options = {}) {
         super();
-
         if (options.service && EMAIL_SERVICES[options.service]) {
             const serviceConfig = EMAIL_SERVICES[options.service];
             this.options = { ...serviceConfig, ...options, auth: options.auth || {} };
@@ -36,7 +35,6 @@ class MySMTPClient extends EventEmitter {
                 ...options
             };
         }
-
         this.socket = null;
         this.connected = false;
         this.authenticated = false;
@@ -47,47 +45,33 @@ class MySMTPClient extends EventEmitter {
     connect() {
         return new Promise((resolve, reject) => {
             if (this.connected) return resolve();
-
-            const connectionOptions = {
-                host: this.options.host,
-                port: this.options.port,
-            };
-
+            const connectionOptions = { host: this.options.host, port: this.options.port };
             const onError = (err) => reject(new Error(`Connection failed: ${err.message}`));
-
             const handleConnect = () => {
                 this.connected = true;
                 this._setupSocketHandlers();
-
-                // Wait for the greeting
                 this.currentHandler = (line) => {
                     const code = parseInt(line.substring(0, 3));
-                    if (code === 220) {
-                        resolve(line);
-                    } else {
-                        reject(new Error(`Unexpected greeting: ${line}`));
-                    }
+                    if (code === 220) resolve(line);
+                    else reject(new Error(`Unexpected greeting: ${line}`));
                 };
             };
-
             this.socket = this.options.secure
                 ? tls.connect(connectionOptions, handleConnect)
                 : net.connect(connectionOptions, handleConnect);
-
-            this.socket.once("error", onError);
-
+            this.socket.once('error', onError);
             setTimeout(() => {
                 if (!this.connected) {
                     this.socket?.destroy();
-                    reject(new Error("Connection timeout"));
+                    reject(new Error('Connection timeout'));
                 }
             }, this.options.timeout);
         });
     }
 
     _setupSocketHandlers() {
-        this.socket.on('data', (data) => this._onData(data));
-        this.socket.on('error', (err) => this._onError(err));
+        this.socket.on('data', (d) => this._onData(d));
+        this.socket.on('error', (e) => this._onError(e));
         this.socket.on('close', () => this._onClose());
         this.socket.on('end', () => this._onEnd());
     }
@@ -97,19 +81,9 @@ class MySMTPClient extends EventEmitter {
         this._processBuffer();
     }
 
-    _onError(error) {
-        this.emit('error', error);
-    }
-
-    _onClose() {
-        this.connected = false;
-        this.emit('close');
-    }
-
-    _onEnd() {
-        this.connected = false;
-        this.emit('end');
-    }
+    _onError(e) { this.emit('error', e); }
+    _onClose() { this.connected = false; this.emit('close'); }
+    _onEnd() { this.connected = false; this.emit('end'); }
 
     _processBuffer() {
         const lines = this.buffer.split('\r\n');
@@ -122,7 +96,6 @@ class MySMTPClient extends EventEmitter {
     _handleResponse(line) {
         if (this.options.debug) console.log('SERVER:', line);
         this.emit('response', line);
-
         if (this.currentHandler) {
             const handler = this.currentHandler;
             this.currentHandler = null;
@@ -133,18 +106,12 @@ class MySMTPClient extends EventEmitter {
     _sendCommand(command, logCommand = null) {
         return new Promise((resolve, reject) => {
             if (!this.connected) return reject(new Error('Not connected'));
-
             if (this.options.debug) console.log('CLIENT:', logCommand || command);
-
             this.currentHandler = (response) => {
                 const code = parseInt(response.substring(0, 3));
-                if (code >= 200 && code < 400) {
-                    resolve(response);
-                } else {
-                    reject(new Error(`SMTP Error: ${response}`));
-                }
+                if (code >= 200 && code < 400) resolve(response);
+                else reject(new Error(`SMTP Error: ${response}`));
             };
-
             this.socket.write(command + '\r\n');
         });
     }
@@ -161,21 +128,17 @@ class MySMTPClient extends EventEmitter {
         });
     }
 
-    async ehlo() {
-        return await this._sendCommand(`EHLO ${this._getHostname()}`);
-    }
+    async ehlo() { return await this._sendCommand(`EHLO ${this._getHostname()}`); }
 
     async login() {
         const { user, pass } = this.options.auth;
         if (!user || !pass) throw new Error('Username and password required for authentication');
-
         try {
             await this._sendCommand('AUTH LOGIN');
             await this._sendCommand(Buffer.from(user).toString('base64'), 'AUTH LOGIN username');
             await this._sendCommand(Buffer.from(pass).toString('base64'), 'AUTH LOGIN password');
             this.authenticated = true;
         } catch {
-            // fallback plain
             const credentials = Buffer.from(`\u0000${user}\u0000${pass}`).toString('base64');
             await this._sendCommand(`AUTH PLAIN ${credentials}`, 'AUTH PLAIN');
             this.authenticated = true;
@@ -185,15 +148,10 @@ class MySMTPClient extends EventEmitter {
 
     async sendMail(mailOptions) {
         if (!this.authenticated) throw new Error('Not authenticated');
-
         const { from, to, subject, text, html, attachments = [] } = mailOptions;
         await this._sendCommand(`MAIL FROM:<${from}>`);
-
         const recipients = Array.isArray(to) ? to : [to];
-        for (const rcpt of recipients) {
-            await this._sendCommand(`RCPT TO:<${rcpt}>`);
-        }
-
+        for (const rcpt of recipients) await this._sendCommand(`RCPT TO:<${rcpt}>`);
         await this._sendCommand('DATA');
         const message = await this._buildMessage(from, recipients, subject, text, html, attachments);
         await this._sendCommand(message + '\r\n.');
@@ -203,8 +161,7 @@ class MySMTPClient extends EventEmitter {
     async _buildMessage(from, to, subject, text, html, attachments) {
         const messageId = this._generateMessageId();
         const date = new Date().toUTCString();
-        const boundary = `boundary_${crypto.randomBytes(8).toString('hex')}`;
-
+        const boundary = `b_${crypto.randomBytes(8).toString('hex')}`;
         let message = [
             `Message-ID: <${messageId}>`,
             `Date: ${date}`,
@@ -214,79 +171,99 @@ class MySMTPClient extends EventEmitter {
             'MIME-Version: 1.0'
         ];
 
-        const hasAttachments = attachments && attachments.length > 0;
+        const inlineFiles = attachments.filter(a => a.cid);
+        const fileAttachments = attachments.filter(a => !a.cid);
         const hasBothTextAndHtml = text && html;
+        const needMultipart = fileAttachments.length > 0 || inlineFiles.length > 0 || hasBothTextAndHtml;
 
-        if (hasAttachments || hasBothTextAndHtml) {
-            const mainBoundary = `main_${boundary}`;
-            message.push(`Content-Type: multipart/mixed; boundary="${mainBoundary}"`, '', `--${mainBoundary}`);
-
-            if (hasBothTextAndHtml) {
-                const altBoundary = `alt_${boundary}`;
-                message.push(
-                    `Content-Type: multipart/alternative; boundary="${altBoundary}"`, '',
-                    `--${altBoundary}`,
-                    'Content-Type: text/plain; charset="UTF-8"',
-                    'Content-Transfer-Encoding: 7bit', '', text, '',
-                    `--${altBoundary}`,
-                    'Content-Type: text/html; charset="UTF-8"',
-                    'Content-Transfer-Encoding: 7bit', '', html, '',
-                    `--${altBoundary}--`, '', `--${mainBoundary}`
-                );
-            } else if (text || html) {
-                message.push(
-                    `Content-Type: ${html ? 'text/html' : 'text/plain'}; charset="UTF-8"`,
-                    'Content-Transfer-Encoding: 7bit', '',
-                    html || text, '',
-                    `--${mainBoundary}`
-                );
-            }
-
-            for (const attachment of attachments) {
-                const att = await this._processAttachment(attachment);
-                message.push(
-                    `Content-Type: ${att.contentType}; name="${att.filename}"`,
-                    'Content-Transfer-Encoding: base64',
-                    `Content-Disposition: attachment; filename="${att.filename}"`, '',
-                    att.content, '', `--${mainBoundary}`
-                );
-            }
-
-            message[message.length - 1] = message[message.length - 1] + '--';
-        } else {
+        if (!needMultipart) {
             message.push(
                 `Content-Type: ${html ? 'text/html' : 'text/plain'}; charset="UTF-8"`,
                 'Content-Transfer-Encoding: 7bit', '',
                 html || text || ''
             );
+            return message.join('\r\n');
         }
 
+        const mainBoundary = `main_${boundary}`;
+        message.push(`Content-Type: multipart/mixed; boundary="${mainBoundary}"`, '', `--${mainBoundary}`);
+
+        if (hasBothTextAndHtml || inlineFiles.length > 0) {
+            const altBoundary = `alt_${boundary}`;
+            message.push(`Content-Type: multipart/related; boundary="${altBoundary}"`, '', `--${altBoundary}`);
+
+            if (hasBothTextAndHtml) {
+                const textBoundary = `text_${boundary}`;
+                message.push(`Content-Type: multipart/alternative; boundary="${textBoundary}"`, '',
+                    `--${textBoundary}`,
+                    'Content-Type: text/plain; charset="UTF-8"',
+                    'Content-Transfer-Encoding: 7bit', '', text || '', '',
+                    `--${textBoundary}`,
+                    'Content-Type: text/html; charset="UTF-8"',
+                    'Content-Transfer-Encoding: 7bit', '', html || '', '',
+                    `--${textBoundary}--`);
+            } else {
+                message.push(
+                    'Content-Type: text/html; charset="UTF-8"',
+                    'Content-Transfer-Encoding: 7bit', '',
+                    html || text || ''
+                );
+            }
+
+            for (const inline of inlineFiles) {
+                const att = await this._processAttachment(inline);
+                message.push(
+                    '', `--${altBoundary}`,
+                    `Content-Type: ${att.contentType}; name="${att.filename}"`,
+                    'Content-Transfer-Encoding: base64',
+                    `Content-Disposition: inline; filename="${att.filename}"`,
+                    `Content-ID: <${inline.cid}>`, '',
+                    att.content
+                );
+            }
+
+            message.push('', `--${altBoundary}--`, '', `--${mainBoundary}`);
+        } else {
+            message.push(
+                `Content-Type: ${html ? 'text/html' : 'text/plain'}; charset="UTF-8"`,
+                'Content-Transfer-Encoding: 7bit', '',
+                html || text || '', '',
+                `--${mainBoundary}`
+            );
+        }
+
+        for (const attachment of fileAttachments) {
+            const att = await this._processAttachment(attachment);
+            message.push(
+                `Content-Type: ${att.contentType}; name="${att.filename}"`,
+                'Content-Transfer-Encoding: base64',
+                `Content-Disposition: attachment; filename="${att.filename}"`, '',
+                att.content, '', `--${mainBoundary}`
+            );
+        }
+
+        message[message.length - 1] = message[message.length - 1] + '--';
         return message.join('\r\n');
     }
 
-    async _processAttachment(attachment) {
+    async _processAttachment(att) {
         let filename, content, contentType;
-        if (typeof attachment === 'string') {
-            filename = path.basename(attachment);
-            content = fs.readFileSync(attachment);
-            contentType = this._getMimeType(attachment);
-        } else if (attachment.filename && attachment.content) {
-            filename = attachment.filename;
-            content = Buffer.isBuffer(attachment.content)
-                ? attachment.content
-                : Buffer.from(attachment.content);
-            contentType = attachment.contentType || this._getMimeType(filename);
-        } else {
-            throw new Error('Invalid attachment format');
-        }
+        if (att.path && fs.existsSync(att.path)) {
+            filename = att.filename || path.basename(att.path);
+            content = fs.readFileSync(att.path);
+            contentType = att.contentType || this._getMimeType(att.path);
+        } else if (att.filename && att.content) {
+            filename = att.filename;
+            content = Buffer.isBuffer(att.content) ? att.content : Buffer.from(att.content);
+            contentType = att.contentType || this._getMimeType(filename);
+        } else throw new Error('Invalid attachment');
         return { filename, content: content.toString('base64'), contentType };
     }
 
     _getMimeType(filename) {
         const ext = path.extname(filename).toLowerCase();
         const mime = {
-            '.txt': 'text/plain', '.html': 'text/html', '.js': 'application/javascript',
-            '.json': 'application/json', '.pdf': 'application/pdf',
+            '.txt': 'text/plain', '.html': 'text/html', '.pdf': 'application/pdf',
             '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif'
         };
         return mime[ext] || 'application/octet-stream';
@@ -297,37 +274,20 @@ class MySMTPClient extends EventEmitter {
     }
 
     _getHostname() {
-        try {
-            return require('os').hostname() || 'localhost';
-        } catch {
-            return 'localhost';
-        }
+        try { return require('os').hostname() || 'localhost'; }
+        catch { return 'localhost'; }
     }
 
-    async quit() {
-        try {
-            await this._sendCommand('QUIT');
-        } catch { }
-        this.close();
-    }
-
-    close() {
-        if (this.socket) this.socket.destroy();
-        this.socket = null;
-        this.connected = false;
-        this.authenticated = false;
-    }
+    async quit() { try { await this._sendCommand('QUIT'); } catch {} this.close(); }
+    close() { if (this.socket) this.socket.destroy(); this.socket = null; this.connected = false; this.authenticated = false; }
 }
 
 async function sendMail(options, mailOptions) {
-    const client = new MySMTPClient(options);
+    const client = new nexusClient(options);
     try {
         await client.connect();
         await client.ehlo();
-        if (!options.secure) {
-            await client.startTLS().catch(() => {});
-            await client.ehlo();
-        }
+        if (!options.secure) { await client.startTLS().catch(() => {}); await client.ehlo(); }
         await client.login();
         const result = await client.sendMail(mailOptions);
         await client.quit();
@@ -345,8 +305,6 @@ async function sendEmail(config) {
     return await sendMail(options, mailOptions);
 }
 
-function getAvailableServices() {
-    return Object.keys(EMAIL_SERVICES);
-}
+function getAvailableServices() { return Object.keys(EMAIL_SERVICES); }
 
-module.exports = { MySMTPClient, sendMail, sendEmail, getAvailableServices, EMAIL_SERVICES };
+module.exports = { nexusClient, sendMail, sendEmail, getAvailableServices, EMAIL_SERVICES };
