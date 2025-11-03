@@ -13,7 +13,7 @@ class MySMTPClient extends EventEmitter {
         
         this.options = {
             host: options.host || 'smtp.gmail.com',
-            port: options.port || 465,
+            port: options.port || 587,
             secure: options.secure || false,
             auth: options.auth || {},
             debug: options.debug || false,
