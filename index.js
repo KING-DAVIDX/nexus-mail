@@ -3,21 +3,79 @@
 const net = require('net');
 const tls = require('tls');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { EventEmitter } = require('events');
+
+// Predefined email services configuration
+const EMAIL_SERVICES = {
+    gmail: {
+        host: 'smtp.gmail.com',
+        port: 587,
+        secure: false
+    },
+    outlook: {
+        host: 'smtp-mail.outlook.com',
+        port: 587,
+        secure: false
+    },
+    yahoo: {
+        host: 'smtp.mail.yahoo.com',
+        port: 587,
+        secure: false
+    },
+    aol: {
+        host: 'smtp.aol.com',
+        port: 587,
+        secure: false
+    },
+    zoho: {
+        host: 'smtp.zoho.com',
+        port: 587,
+        secure: false
+    },
+    icloud: {
+        host: 'smtp.mail.me.com',
+        port: 587,
+        secure: false
+    },
+    office365: {
+        host: 'smtp.office365.com',
+        port: 587,
+        secure: false
+    },
+    // Add more services as needed
+    custom: {
+        // For custom SMTP servers
+        host: '',
+        port: 587,
+        secure: false
+    }
+};
 
 class MySMTPClient extends EventEmitter {
     constructor(options = {}) {
         super();
         
-        this.options = {
-            host: options.host || 'smtp.gmail.com',
-            port: options.port || 587,
-            secure: options.secure || false,
-            auth: options.auth || {},
-            debug: options.debug || false,
-            timeout: options.timeout || 30000,
-            ...options
-        };
+        // Handle service-based configuration
+        if (options.service && EMAIL_SERVICES[options.service]) {
+            const serviceConfig = EMAIL_SERVICES[options.service];
+            this.options = {
+                ...serviceConfig,
+                ...options,
+                auth: options.auth || {}
+            };
+        } else {
+            this.options = {
+                host: options.host || 'smtp.gmail.com',
+                port: options.port || 587,
+                secure: options.secure || false,
+                auth: options.auth || {},
+                debug: options.debug || false,
+                timeout: options.timeout || 30000,
+                ...options
+            };
+        }
         
         this.socket = null;
         this.connected = false;
@@ -236,7 +294,7 @@ class MySMTPClient extends EventEmitter {
             throw new Error('Not authenticated');
         }
 
-        const { from, to, subject, text, html } = mailOptions;
+        const { from, to, subject, text, html, attachments = [] } = mailOptions;
 
         await this._sendCommand(`MAIL FROM:<${from}>`);
 
@@ -247,15 +305,16 @@ class MySMTPClient extends EventEmitter {
 
         await this._sendCommand('DATA');
 
-        const message = this._buildMessage(from, recipients, subject, text, html);
+        const message = await this._buildMessage(from, recipients, subject, text, html, attachments);
         await this._sendCommand(message + '\r\n.');
 
         return { messageId: this._generateMessageId(), accepted: recipients };
     }
 
-    _buildMessage(from, to, subject, text, html) {
+    async _buildMessage(from, to, subject, text, html, attachments) {
         const messageId = this._generateMessageId();
         const date = new Date().toUTCString();
+        const boundary = `boundary_${crypto.randomBytes(8).toString('hex')}`;
         
         let message = [
             `Message-ID: <${messageId}>`,
@@ -266,34 +325,138 @@ class MySMTPClient extends EventEmitter {
             'MIME-Version: 1.0'
         ];
 
-        if (html) {
-            message.push(
-                'Content-Type: multipart/alternative; boundary="boundary"',
-                '',
-                '--boundary',
-                'Content-Type: text/plain; charset="UTF-8"',
-                'Content-Transfer-Encoding: 7bit',
-                '',
-                text || 'This is a multi-part message in MIME format.',
-                '',
-                '--boundary',
-                'Content-Type: text/html; charset="UTF-8"',
-                'Content-Transfer-Encoding: 7bit',
-                '',
-                html,
-                '',
-                '--boundary--'
-            );
+        // Check if we have attachments or both text and html
+        const hasAttachments = attachments && attachments.length > 0;
+        const hasBothTextAndHtml = text && html;
+
+        if (hasAttachments || hasBothTextAndHtml) {
+            const mainBoundary = `main_${boundary}`;
+            message.push(`Content-Type: multipart/mixed; boundary="${mainBoundary}"`);
+            message.push('');
+            message.push(`--${mainBoundary}`);
+
+            if (hasBothTextAndHtml) {
+                const altBoundary = `alt_${boundary}`;
+                message.push(`Content-Type: multipart/alternative; boundary="${altBoundary}"`);
+                message.push('');
+                message.push(`--${altBoundary}`);
+                message.push('Content-Type: text/plain; charset="UTF-8"');
+                message.push('Content-Transfer-Encoding: 7bit');
+                message.push('');
+                message.push(text || '');
+                message.push('');
+                message.push(`--${altBoundary}`);
+                message.push('Content-Type: text/html; charset="UTF-8"');
+                message.push('Content-Transfer-Encoding: 7bit');
+                message.push('');
+                message.push(html || '');
+                message.push('');
+                message.push(`--${altBoundary}--`);
+                message.push('');
+                message.push(`--${mainBoundary}`);
+            } else if (text) {
+                message.push('Content-Type: text/plain; charset="UTF-8"');
+                message.push('Content-Transfer-Encoding: 7bit');
+                message.push('');
+                message.push(text || '');
+                message.push('');
+                message.push(`--${mainBoundary}`);
+            } else if (html) {
+                message.push('Content-Type: text/html; charset="UTF-8"');
+                message.push('Content-Transfer-Encoding: 7bit');
+                message.push('');
+                message.push(html || '');
+                message.push('');
+                message.push(`--${mainBoundary}`);
+            }
+
+            // Add attachments
+            for (const attachment of attachments) {
+                const attachmentData = await this._processAttachment(attachment);
+                message.push(`Content-Type: ${attachmentData.contentType}; name="${attachmentData.filename}"`);
+                message.push('Content-Transfer-Encoding: base64');
+                message.push(`Content-Disposition: attachment; filename="${attachmentData.filename}"`);
+                message.push('');
+                message.push(attachmentData.content);
+                message.push('');
+                message.push(`--${mainBoundary}`);
+            }
+
+            message[message.length - 1] = message[message.length - 1] + '--';
         } else {
-            message.push(
-                'Content-Type: text/plain; charset="UTF-8"',
-                'Content-Transfer-Encoding: 7bit',
-                '',
-                text
-            );
+            // Simple message without attachments
+            if (html) {
+                message.push('Content-Type: text/html; charset="UTF-8"');
+            } else {
+                message.push('Content-Type: text/plain; charset="UTF-8"');
+            }
+            message.push('Content-Transfer-Encoding: 7bit');
+            message.push('');
+            message.push(html || text || '');
         }
 
         return message.join('\r\n');
+    }
+
+    async _processAttachment(attachment) {
+        let filename, content, contentType;
+        
+        if (typeof attachment === 'string') {
+            // File path
+            filename = path.basename(attachment);
+            content = fs.readFileSync(attachment);
+            contentType = this._getMimeType(attachment) || 'application/octet-stream';
+        } else if (attachment.filename && attachment.content) {
+            // Object with filename and content
+            filename = attachment.filename;
+            content = Buffer.isBuffer(attachment.content) ? 
+                     attachment.content : 
+                     Buffer.from(attachment.content);
+            contentType = attachment.contentType || 
+                         this._getMimeType(filename) || 
+                         'application/octet-stream';
+        } else {
+            throw new Error('Invalid attachment format');
+        }
+
+        return {
+            filename,
+            content: content.toString('base64'),
+            contentType
+        };
+    }
+
+    _getMimeType(filename) {
+        const ext = path.extname(filename).toLowerCase();
+        const mimeTypes = {
+            '.txt': 'text/plain',
+            '.html': 'text/html',
+            '.htm': 'text/html',
+            '.css': 'text/css',
+            '.js': 'application/javascript',
+            '.json': 'application/json',
+            '.xml': 'application/xml',
+            '.pdf': 'application/pdf',
+            '.zip': 'application/zip',
+            '.doc': 'application/msword',
+            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            '.xls': 'application/vnd.ms-excel',
+            '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            '.ppt': 'application/vnd.ms-powerpoint',
+            '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.gif': 'image/gif',
+            '.bmp': 'image/bmp',
+            '.svg': 'image/svg+xml',
+            '.mp3': 'audio/mpeg',
+            '.wav': 'audio/wav',
+            '.mp4': 'video/mp4',
+            '.avi': 'video/x-msvideo'
+        };
+        
+        return mimeTypes[ext] || 'application/octet-stream';
     }
 
     _generateMessageId() {
@@ -312,6 +475,7 @@ class MySMTPClient extends EventEmitter {
         try {
             await this._sendCommand('QUIT');
         } catch (error) {
+            // Ignore errors during quit
         } finally {
             this.close();
         }
@@ -327,6 +491,7 @@ class MySMTPClient extends EventEmitter {
     }
 }
 
+// User-friendly function to send email
 async function sendMail(options, mailOptions) {
     const client = new MySMTPClient(options);
     
@@ -348,7 +513,40 @@ async function sendMail(options, mailOptions) {
     }
 }
 
+// High-level user-friendly function
+async function sendEmail(config) {
+    const { service, auth, from, to, subject, text, html, attachments, debug = false } = config;
+    
+    const options = {
+        service,
+        auth: {
+            user: auth.user,
+            pass: auth.pass
+        },
+        debug
+    };
+
+    const mailOptions = {
+        from,
+        to,
+        subject,
+        text,
+        html,
+        attachments
+    };
+
+    return await sendMail(options, mailOptions);
+}
+
+// Export available services
+function getAvailableServices() {
+    return Object.keys(EMAIL_SERVICES);
+}
+
 module.exports = {
     MySMTPClient,
-    sendMail
+    sendMail,
+    sendEmail,
+    getAvailableServices,
+    EMAIL_SERVICES
 };
